@@ -1,26 +1,198 @@
 @import "tailwindcss";
 
+/*
+ * Design tokens. Text colours meet WCAG AA (4.5:1) on their backgrounds.
+ * Theme: <html data-theme="light|dark"> forces one; no attribute follows the
+ * device setting. The attribute is set before first paint (see app/layout.tsx).
+ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: light;
+  --background: #f7f7f8;
+  --surface: #ffffff;
+  --surface-muted: #f1f1f3;
+  --foreground: #18181b;
+  --muted: #5b5b66;
+  --border: #e2e2e7;
+  --border-strong: #c4c4cc;
+  --primary: #3b4fd8;
+  --primary-hover: #3141b8;
+  --primary-foreground: #ffffff;
+  --primary-surface: #eef0fd;
+  --danger: #b42318;
+  --danger-hover: #912018;
+  --danger-foreground: #ffffff;
+  --danger-surface: #fef3f2;
+  --success: #067647;
+  --success-surface: #ecfdf3;
+  --warning: #93370d;
+  --warning-surface: #fffaeb;
+  --focus: #3b4fd8;
+}
+
+/* Dark tokens, used when chosen explicitly… */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #0f0f12;
+  --surface: #18181c;
+  --surface-muted: #222228;
+  --foreground: #ececf1;
+  --muted: #a6a6b2;
+  --border: #2c2c33;
+  --border-strong: #44444d;
+  --primary: #8b9aff;
+  --primary-hover: #a3afff;
+  --primary-foreground: #0b0b10;
+  --primary-surface: #1e2240;
+  --danger: #ff8a7f;
+  --danger-hover: #ffa69d;
+  --danger-foreground: #1a0b09;
+  --danger-surface: #2d1715;
+  --success: #6ce0a4;
+  --success-surface: #102a1e;
+  --warning: #f9c56b;
+  --warning-surface: #2c2213;
+  --focus: #8b9aff;
+}
+
+/* …or when the device is in dark mode and no theme was chosen. Keep in sync with the block above. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --background: #0f0f12;
+    --surface: #18181c;
+    --surface-muted: #222228;
+    --foreground: #ececf1;
+    --muted: #a6a6b2;
+    --border: #2c2c33;
+    --border-strong: #44444d;
+    --primary: #8b9aff;
+    --primary-hover: #a3afff;
+    --primary-foreground: #0b0b10;
+    --primary-surface: #1e2240;
+    --danger: #ff8a7f;
+    --danger-hover: #ffa69d;
+    --danger-foreground: #1a0b09;
+    --danger-surface: #2d1715;
+    --success: #6ce0a4;
+    --success-surface: #102a1e;
+    --warning: #f9c56b;
+    --warning-surface: #2c2213;
+    --focus: #8b9aff;
+  }
 }
 
 @theme inline {
   --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
   --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-surface: var(--primary-surface);
+  --color-danger: var(--danger);
+  --color-danger-hover: var(--danger-hover);
+  --color-danger-foreground: var(--danger-foreground);
+  --color-danger-surface: var(--danger-surface);
+  --color-success: var(--success);
+  --color-success-surface: var(--success-surface);
+  --color-warning: var(--warning);
+  --color-warning-surface: var(--warning-surface);
+  --color-focus: var(--focus);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+/*
+ * Visible focus for keyboard users everywhere. In the base layer so a utility
+ * can adjust it where needed (inset rings in lists, cards that show the ring
+ * for a link inside them).
+ */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+}
+
+/* Long-form text on the Terms, Privacy and Refund pages. */
+.legal-doc {
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.legal-doc > * + * {
+  margin-top: 1em;
+}
+.legal-doc h2 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  line-height: 1.35;
+  margin-top: 2.25em;
+}
+.legal-doc h2 + * {
+  margin-top: 0.75em;
+}
+.legal-doc ul {
+  list-style: disc;
+  padding-left: 1.5rem;
+}
+.legal-doc li + li {
+  margin-top: 0.4em;
+}
+.legal-doc a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
+/* Script text: shared by the editor and the read-only view. */
+.script-doc {
+  font-size: 0.975rem;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.script-doc > * + * {
+  margin-top: 0.6em;
+}
+.script-doc h2 {
+  font-size: 1.2rem;
+  font-weight: 600;
+  line-height: 1.35;
+  margin-top: 1.25em;
+}
+.script-doc h3 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin-top: 1em;
+}
+.script-doc > :first-child {
+  margin-top: 0;
+}
+.script-doc ul {
+  list-style: disc;
+  padding-left: 1.5rem;
+}
+.script-doc ol {
+  list-style: decimal;
+  padding-left: 1.5rem;
+}
+.script-doc li + li {
+  margin-top: 0.25em;
+}
+.script-doc li > p + p {
+  margin-top: 0.4em;
+}
+/* Keep blank lines visible. */
+.script-doc p:empty,
+.script-doc p:has(> br.ProseMirror-trailingBreak:only-child) {
+  min-height: 1.65em;
 }

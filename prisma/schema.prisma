@@ -1,0 +1,519 @@
+// Prisma ORM 7. Connection URLs are NOT in this file (removed in v7):
+//  - CLI / migrations: prisma.config.ts -> datasource.url = DIRECT_URL
+//  - Runtime: PrismaClient({ adapter: new PrismaPg({ connectionString: DATABASE_URL }) })  (pooled)
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─────────────────────────── Tenancy ───────────────────────────
+//
+// An Organization is one customer. Everything a customer owns carries its
+// organizationId, and the links between tenant-owned rows use composite
+// foreign keys (organizationId, id), so the database itself refuses a role,
+// membership or item that points into another organization.
+
+model Organization {
+  id          String    @id @default(cuid())
+  slug        String    @unique // in every URL: /acme-media/board
+  name        String
+  isActive    Boolean   @default(true) // false => suspended by the platform; nobody can open it
+  suspendedAt DateTime?
+  itemCounter Int       @default(0) // last item number handed out ("#142"); numbers are per organization
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  members       OrganizationMember[]
+  departments   Department[]
+  notifications Notification[]
+  auditLogs     AuditLog[]
+}
+
+// Someone's place in an organization. Admin rights and deactivation are per
+// organization: leaving one customer never affects the others.
+model OrganizationMember {
+  id             String    @id @default(cuid())
+  organizationId String
+  userId         String
+  isAdmin        Boolean   @default(false) // manages people and settings of this organization
+  isActive       Boolean   @default(true) // false => can't open this organization; history is kept
+  deactivatedAt  DateTime?
+  joinedAt       DateTime? // first opened the organization; null => invited, not in yet
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  user         User         @relation(fields: [userId], references: [id])
+  roles        Membership[]
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+}
+
+// Self-service sign-up waiting for its email to be confirmed. Nothing else
+// exists until the link is used, so nobody can squat on someone else's address.
+model PendingSignup {
+  id               String    @id @default(cuid())
+  email            String // lower-case
+  name             String
+  organizationName String
+  organizationSlug String // wanted; re-checked (and suffixed if taken) when the link is used
+  timeZone         String    @default("UTC") // from the browser; the starter department uses it
+  tokenHash        String    @unique
+  expiresAt        DateTime
+  usedAt           DateTime?
+  createdAt        DateTime  @default(now())
+
+  @@index([email])
+  @@index([expiresAt])
+}
+
+// ─────────────────────────── People & departments ───────────────────────────
+
+model Department {
+  id                 String   @id @default(cuid())
+  organizationId     String
+  key                String // "media", unique within the organization
+  name               String // "Media"
+  timezone           String   @default("UTC") // deadlines, "this week", overdue
+  draftsVisibleToAll Boolean  @default(false)
+  stuckAfterHours    Int      @default(48) // a Stage can override
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  organization Organization  @relation(fields: [organizationId], references: [id])
+  roles        Role[]
+  workflows    Workflow[]
+  contentItems ContentItem[]
+  auditLogs    AuditLog[]
+
+  @@unique([organizationId, key])
+  @@unique([organizationId, id]) // target of the tenant-safe foreign keys
+}
+
+// Department-level roles. Logic checks the permission flags and the role a
+// task template points at — never a hard-coded role name.
+model Role {
+  id             String   @id @default(cuid())
+  organizationId String // always the department's organization (enforced by the foreign key)
+  departmentId   String
+  key            String // "SCRIPT_WRITER"
+  name           String // "Script writer"
+  canCreateItems Boolean  @default(false) // PM, Script writer
+  canManageItems Boolean  @default(false) // PM: see drafts, assign, reassign, act on any task, final approval
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  department    Department     @relation(fields: [organizationId, departmentId], references: [organizationId, id])
+  memberships   Membership[]
+  taskTemplates TaskTemplate[]
+
+  @@unique([departmentId, key])
+  @@unique([organizationId, id])
+}
+
+model User {
+  id                 String    @id @default(cuid())
+  email              String    @unique // always stored lower-case; one account across organizations
+  name               String
+  passwordHash       String? // null until the invite is accepted
+  isPlatformAdmin    Boolean   @default(false) // runs the service (suspends organizations); sees no customer data
+  isActive           Boolean   @default(true) // false => suspended from the whole service
+  deactivatedAt      DateTime?
+  mustChangePassword Boolean   @default(false)
+  sessionVersion     Int       @default(0) // bump => every session for this user is rejected
+  emailNotifications Boolean   @default(true)
+  lastLoginAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  orgMemberships      OrganizationMember[]
+  memberships         Membership[]
+  authTokens          AuthToken[]
+  createdItems        ContentItem[]    @relation("ItemCreatedBy")
+  assignedTasks       Task[]           @relation("TaskAssignee")
+  assignmentHistory   TaskAssignment[] @relation("AssignmentUser")
+  assignmentsMade     TaskAssignment[] @relation("AssignmentBy")
+  scriptVersions      ScriptVersion[]
+  comments            Comment[]        @relation("CommentAuthor")
+  resolvedComments    Comment[]        @relation("CommentResolvedBy")
+  uploads             Attachment[]     @relation("AttachmentUploader")
+  deletedAttachments  Attachment[]     @relation("AttachmentDeletedBy")
+  notifications       Notification[]   @relation("NotificationRecipient")
+  notificationsCaused Notification[]   @relation("NotificationActor")
+  auditLogs           AuditLog[]
+
+  @@index([isActive])
+}
+
+// A role someone holds. Both foreign keys include the organization, so a role
+// can only be given to a member of the role's own organization.
+model Membership {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  roleId         String // role implies the department
+  createdAt      DateTime @default(now())
+
+  user   User               @relation(fields: [userId], references: [id])
+  member OrganizationMember @relation(fields: [organizationId, userId], references: [organizationId, userId], onDelete: Cascade)
+  role   Role               @relation(fields: [organizationId, roleId], references: [organizationId, id])
+
+  @@unique([userId, roleId])
+  @@index([roleId])
+  @@index([organizationId, userId])
+}
+
+enum AuthTokenType {
+  INVITE
+  PASSWORD_RESET
+}
+
+// One-time links for "set your password" / "forgot password". Only a hash is stored.
+model AuthToken {
+  id        String        @id @default(cuid())
+  userId    String
+  type      AuthTokenType
+  tokenHash String        @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime      @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, type])
+}
+
+// Fixed-window counters for rate limiting (works across Vercel instances).
+model RateLimitBucket {
+  key         String   @id // e.g. "login:ip:203.0.113.7", "login:email:x@example.com"
+  count       Int
+  windowStart DateTime
+  expiresAt   DateTime
+
+  @@index([expiresAt])
+}
+
+// ─────────────────────────── Workflow definition (data) ───────────────────────────
+
+enum StageKind {
+  WORK // one or more tasks are worked on here (2+ tasks = parallel)
+  QUEUE // handed over, waiting for the next stage's people to start
+  DONE // finished
+}
+
+model Workflow {
+  id           String   @id @default(cuid())
+  departmentId String
+  name         String
+  version      Int      @default(1)
+  isActive     Boolean  @default(true) // the version used for new items
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  department Department    @relation(fields: [departmentId], references: [id])
+  stages     Stage[]
+  items      ContentItem[]
+
+  @@unique([departmentId, name, version])
+  @@index([departmentId, isActive])
+}
+
+model Stage {
+  id              String    @id @default(cuid())
+  workflowId      String
+  key             String // "IN_EDITING" (stable, used in code/tests)
+  name            String // "Editing" (shown in the UI)
+  description     String?
+  position        Int // 1..n
+  kind            StageKind
+  stuckAfterHours Int? // overrides Department.stuckAfterHours
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  workflow       Workflow        @relation(fields: [workflowId], references: [id])
+  taskTemplates  TaskTemplate[] // WORK stages only
+  items          ContentItem[]
+  scriptVersions ScriptVersion[]
+
+  @@unique([workflowId, key])
+  @@unique([workflowId, position])
+}
+
+// "One task per role": each WORK stage defines the task(s) done in it.
+model TaskTemplate {
+  id            String   @id @default(cuid())
+  stageId       String
+  key           String // "DESIGN"
+  name          String // "Design"
+  roleId        String
+  position      Int      @default(1) // order inside a parallel stage
+  canEditScript Boolean  @default(false) // Script + Edit tasks
+  submitLabel   String // "Send for editing", "Approve script", "Mark design done", "Approve & complete"
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  stage Stage  @relation(fields: [stageId], references: [id])
+  role  Role   @relation(fields: [roleId], references: [id])
+  tasks Task[]
+
+  @@unique([stageId, key])
+  @@index([roleId])
+}
+
+// ─────────────────────────── Work ───────────────────────────
+
+model ContentItem {
+  id                  String    @id @default(cuid())
+  organizationId      String
+  number              Int // shown as "#142"; from Organization.itemCounter, unique per organization
+  departmentId        String
+  workflowId          String
+  stageId             String // exactly one current stage
+  stageEnteredAt      DateTime  @default(now()) // "stuck" detection
+  stateVersion        Int       @default(0) // +1 on every state change; stale actions are rejected
+  title               String
+  brief               String
+  deadline            DateTime?
+  createdById         String
+  firstSubmittedAt    DateTime? // null => private draft (unless draftsVisibleToAll)
+  completedAt         DateTime?
+  archivedAt          DateTime?
+  latestScriptVersion Int       @default(0) // optimistic lock for script saves
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  department     Department      @relation(fields: [organizationId, departmentId], references: [organizationId, id])
+  workflow       Workflow        @relation(fields: [workflowId], references: [id])
+  stage          Stage           @relation(fields: [stageId], references: [id])
+  createdBy      User            @relation("ItemCreatedBy", fields: [createdById], references: [id])
+  tasks          Task[]
+  scriptVersions ScriptVersion[]
+  comments       Comment[]
+  attachments    Attachment[]
+  notifications  Notification[]
+  auditLogs      AuditLog[]
+
+  @@unique([organizationId, number])
+  @@index([departmentId, stageId])
+  @@index([departmentId, deadline])
+  @@index([departmentId, updatedAt]) // board polling
+  @@index([departmentId, completedAt]) // "completed this week"
+  @@index([createdById])
+}
+
+enum TaskStatus {
+  LOCKED // its stage hasn't been reached yet
+  READY // reached, not started
+  IN_PROGRESS
+  SENT_BACK // returned to this person for rework
+  DONE
+}
+
+model Task {
+  id               String     @id @default(cuid())
+  itemId           String
+  templateId       String
+  assigneeId       String? // null => in the role's pool, anyone with the role can pick it up
+  status           TaskStatus @default(LOCKED)
+  changesRequested Boolean    @default(false) // open change request(s) on this task
+  readyAt          DateTime?
+  startedAt        DateTime?
+  completedAt      DateTime?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  item        ContentItem      @relation(fields: [itemId], references: [id])
+  template    TaskTemplate     @relation(fields: [templateId], references: [id])
+  assignee    User?            @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  assignments TaskAssignment[]
+  comments    Comment[]
+  attachments Attachment[]
+
+  @@unique([itemId, templateId])
+  @@index([assigneeId, status]) // "my work", workload
+  @@index([templateId, status])
+}
+
+// Every (re)assignment, so history survives reassignment mid-task.
+model TaskAssignment {
+  id           String    @id @default(cuid())
+  taskId       String
+  userId       String
+  assignedById String?
+  note         String?
+  assignedAt   DateTime  @default(now())
+  endedAt      DateTime?
+
+  task       Task  @relation(fields: [taskId], references: [id])
+  user       User  @relation("AssignmentUser", fields: [userId], references: [id])
+  assignedBy User? @relation("AssignmentBy", fields: [assignedById], references: [id])
+
+  @@index([taskId, assignedAt])
+  @@index([userId])
+}
+
+enum ScriptVersionReason {
+  SAVE
+  SUBMIT
+  RESTORE
+}
+
+// Immutable. Restoring creates a new version with the old content.
+model ScriptVersion {
+  id                 String              @id @default(cuid())
+  itemId             String
+  number             Int
+  content            Json // rich-text document (editor JSON, validated server-side)
+  plainText          String // copy-as-text, compare, search
+  reason             ScriptVersionReason
+  restoredFromNumber Int?
+  authorId           String
+  stageId            String // stage when saved
+  createdAt          DateTime            @default(now())
+
+  item   ContentItem @relation(fields: [itemId], references: [id])
+  author User        @relation(fields: [authorId], references: [id])
+  stage  Stage       @relation(fields: [stageId], references: [id])
+
+  @@unique([itemId, number])
+}
+
+enum CommentKind {
+  COMMENT
+  CHANGE_REQUEST
+  SEND_BACK // the required reason for a send-back
+}
+
+model Comment {
+  id           String      @id @default(cuid())
+  itemId       String
+  taskId       String? // null => about the item in general
+  parentId     String? // replies (one level deep)
+  authorId     String
+  kind         CommentKind @default(COMMENT)
+  body         String
+  resolvedAt   DateTime? // CHANGE_REQUEST only
+  resolvedById String?
+  editedAt     DateTime?
+  deletedAt    DateTime? // soft delete, shown as "comment removed"
+  createdAt    DateTime    @default(now())
+
+  item       ContentItem @relation(fields: [itemId], references: [id])
+  task       Task?       @relation(fields: [taskId], references: [id])
+  parent     Comment?    @relation("CommentThread", fields: [parentId], references: [id])
+  replies    Comment[]   @relation("CommentThread")
+  author     User        @relation("CommentAuthor", fields: [authorId], references: [id])
+  resolvedBy User?       @relation("CommentResolvedBy", fields: [resolvedById], references: [id])
+
+  @@index([itemId, createdAt])
+  @@index([taskId])
+  @@index([parentId])
+}
+
+enum AttachmentStatus {
+  PENDING // upload URL issued, not yet confirmed
+  READY
+  DELETED
+}
+
+// Files live in object storage; only metadata is here.
+model Attachment {
+  id          String           @id @default(cuid())
+  itemId      String
+  taskId      String?
+  uploaderId  String
+  fileName    String
+  contentType String
+  sizeBytes   BigInt // videos can exceed 2 GB
+  storageKey  String           @unique
+  status      AttachmentStatus @default(PENDING)
+  uploadedAt  DateTime?
+  deletedAt   DateTime?
+  deletedById String?
+  createdAt   DateTime         @default(now())
+
+  item      ContentItem @relation(fields: [itemId], references: [id])
+  task      Task?       @relation(fields: [taskId], references: [id])
+  uploader  User        @relation("AttachmentUploader", fields: [uploaderId], references: [id])
+  deletedBy User?       @relation("AttachmentDeletedBy", fields: [deletedById], references: [id])
+
+  @@index([itemId, status])
+  @@index([status, createdAt]) // clean up abandoned uploads
+}
+
+enum NotificationType {
+  TASK_READY // work reached your stage (or your role's pool)
+  SENT_BACK
+  REASSIGNED_TO_YOU
+  REASSIGNED_AWAY
+  CHANGES_REQUESTED
+  COMMENT
+  ON_HOLD // the item was pulled back while your parallel task was open
+  RESUMED // ...and it is back
+}
+
+enum EmailStatus {
+  NOT_SENDING // in-app only, or user turned email off
+  PENDING
+  SENT
+  FAILED
+}
+
+// Doubles as the email outbox: sent right after the response, retried by cron.
+model Notification {
+  id             String           @id @default(cuid())
+  organizationId String
+  userId         String
+  type           NotificationType
+  itemId         String?
+  actorId        String?
+  title          String
+  body           String?
+  readAt         DateTime?
+  emailStatus    EmailStatus      @default(PENDING)
+  emailAttempts  Int              @default(0)
+  emailSentAt    DateTime?
+  emailError     String?
+  createdAt      DateTime         @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  user         User         @relation("NotificationRecipient", fields: [userId], references: [id])
+  actor        User?        @relation("NotificationActor", fields: [actorId], references: [id])
+  item         ContentItem? @relation(fields: [itemId], references: [id])
+
+  @@index([userId, organizationId, readAt, createdAt])
+  @@index([emailStatus, createdAt])
+}
+
+// Append-only. Written in the same transaction as the change it records.
+model AuditLog {
+  id             String   @id @default(cuid())
+  organizationId String? // null => not about one organization (sign-in, sign-up, platform)
+  departmentId   String?
+  actorId        String? // null => system (cron)
+  action         String // "task.submitted", "task.sent_back", "user.deactivated", ... (typed union in code)
+  entityType     String // "ContentItem" | "Task" | "User" | "Stage" | ...
+  entityId       String
+  itemId         String? // drives the item's activity timeline
+  data           Json? // from/to stage, before/after values, notes
+  ipAddress      String? // auth events only
+  createdAt      DateTime @default(now())
+
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  department   Department?   @relation(fields: [departmentId], references: [id])
+  actor        User?         @relation(fields: [actorId], references: [id])
+  item         ContentItem?  @relation(fields: [itemId], references: [id])
+
+  @@index([itemId, createdAt])
+  @@index([entityType, entityId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([departmentId, createdAt])
+  @@index([organizationId, createdAt])
+}
